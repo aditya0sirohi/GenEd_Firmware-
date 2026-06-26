@@ -1,43 +1,51 @@
-# Connectivity-Resilient ESP32 Companion Firmware Foundation
+# GenEd Companion Firmware
 
-## Overview
-This repository contains the simulation-first firmware foundation for the GenEd ESP32-class companion device. It is designed to survive unreliable connectivity, power loss, flash corruption, and OTA failures by implementing a robust Hardware Abstraction Layer (HAL), an event-driven architecture, and state-machine-driven modules.
+Simulation-first firmware foundation for ESP32-class GenEd companion devices.
 
-## Architectural Highlights
-* **Durable Event Pipeline:** Interaction events are written atomically to a durable queue (simulated flash) before network transmission.
-* **Safe A/B OTA Updates:** Cryptographically verified updates with strict boot-confirmation health checks and automatic rollback capabilities.
-* **Diagnostics Framework:** A flight-recorder style ring buffer that captures state transitions and crash metadata for post-mortem analysis.
-* **Strict Portability:** The core business logic interacts entirely through virtual C++ interfaces (`IStorage`, `INetwork`, `IIO`).
+## Requirements
+- Windows with MinGW (g++) OR Linux/Ubuntu
+- Python 3.x
+- Flask: `pip install flask`
+- requests: `pip install requests`
 
-## Folder Structure
-* `/docs/`: Architecture decisions, state machines (`STATE_POWER.md`, etc.), and identified spec gaps (`GAPS.md`).
-* `/firmware/hal/`: The portability boundary. Contains pure virtual interfaces and simulated implementations.
-* `/firmware/event_runtime/`: Manages the durable queue and event syncing logic.
-* `/firmware/ota/`: Handles safe firmware updates.
-* `/firmware/connectivity/`: Manages network state and exponential backoff retry policies.
-* `/tools/`: Python mock cloud endpoints and fault-injection simulation runner.
+## Build
 
-## How to Run the Simulation Setup
+```powershell
+g++ -std=c++17 -I firmware/hal/include -I firmware/event_runtime firmware/hal/sim/hal_sim.cpp firmware/event_runtime/event_queue.cpp firmware/app_runtime/main.cpp -o gened_firmware.exe
+```
 
-**1. Start the Mock Cloud Server:**
-This spins up the simulated GenEd backend to receive telemetry and provide OTA payloads.
-\`\`\`bash
-cd tools
-python3 mock_server.py
-\`\`\`
+## Run
 
-**2. Compile and Run the C++ Firmware (Host Simulation):**
-\`\`\`bash
-mkdir build && cd build
-cmake ..
-make
-./gened_firmware_sim
-\`\`\`
+Terminal 1 — Mock Server:
+```powershell
+python tools/mock_server.py
+```
 
-**3. Inject Faults:**
-Use the runner to trigger network drops or power loss during the simulation.
-\`\`\`bash
-python3 tools/sim_runner.py --inject-fault NETWORK_LOSS
-\`\`\`
+Terminal 2 — Firmware:
+```powershell
+.\gened_firmware.exe
+```
 
-> **Note to Reviewer:** Please refer to `docs/GAPS.md` for architectural assumptions made where the specification left intentional implementation gaps.
+Terminal 3 — Scenarios:
+```powershell
+python tools/sim_runner.py --list
+python tools/sim_runner.py --scenario connectivity_loss
+python tools/sim_runner.py --scenario full_demo
+```
+
+## Project Structure
+```
+firmware/hal/include/   — HAL interfaces (hal.h)
+firmware/hal/sim/       — Simulation implementations
+firmware/hal/esp32/     — ESP32 stubs (portability boundary)
+firmware/app_runtime/   — Boot sequence + 6 RTOS tasks
+firmware/event_runtime/ — Durable event queue
+firmware/ota/           — OTA state machine
+firmware/diagnostics/   — Metrics, traces, crash records
+firmware/power/         — Battery state machine
+firmware/connectivity/  — WiFi state management
+firmware/rules_engine/  — Derived event detection
+tools/mock_server.py    — Flask mock cloud server
+tools/sim_runner.py     — Fault injection scenario runner
+docs/                   — Architecture, gaps, memory budget
+```

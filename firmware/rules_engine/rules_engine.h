@@ -1,12 +1,7 @@
 #pragma once
-#include <string>
+#include <cstdint>
 #include <vector>
-
-// Note: Assuming an Event struct exists in your event_runtime module
-struct Event {
-    std::string type;
-    uint64_t timestamp_ms;
-};
+#include "../event_runtime/event.h"
 
 class RulesEngine {
 public:
