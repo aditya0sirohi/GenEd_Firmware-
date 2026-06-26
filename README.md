@@ -33,6 +33,37 @@ python tools/sim_runner.py --scenario connectivity_loss
 python tools/sim_runner.py --scenario full_demo
 ```
 
+## Simulation in Action
+
+These screenshots capture the current working simulation path end to end.
+
+### Boot Sequence + All 6 Tasks Running
+![Boot Sequence](docs/screenshots/boot_sequence.png)
+
+### Mock Cloud Receiving Telemetry + OTA Requests
+![Mock Cloud Requests](docs/screenshots/server_requests.png)
+
+### OTA Update Flow (BLUE -> GREEN)
+![OTA Flow](docs/screenshots/ota_flow.png)
+
+### Inactivity + Engagement Drop Events
+![Derived Events](docs/screenshots/derived_events.png)
+
+### Events Committing + Compaction
+![Event Queue](docs/screenshots/event_queue.png)
+
+### Diagnostics Health Log
+![Diagnostics](docs/screenshots/diagnostics.png)
+
+Working coverage shown:
+
+- Boot sequence and all 6 tasks running
+- Mock cloud endpoints receiving telemetry and OTA requests
+- OTA update flow with LED state moving BLUE -> GREEN
+- Derived events: `inactivity_detected` and `engagement_drop`
+- Event commit path and queue compaction
+- Diagnostics health logs for uptime, battery, pending events, connectivity, and OTA state
+
 ## Project Structure
 ```
 firmware/hal/include/   — HAL interfaces (hal.h)
