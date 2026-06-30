@@ -21,8 +21,11 @@ public:
     Status mark_record_committed(LogId log, RecordId id) override;
     Status inject_corruption_for_test(Key key, CorruptionMode mode) override;
 
+    uint32_t write_count_for(const std::string& region) const;
+    size_t used_bytes() const;
+
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::map<std::string, std::vector<uint8_t>> blobs_;
     struct Record {
         RecordId id;
@@ -31,7 +34,13 @@ private:
     };
     std::map<LogId, std::vector<Record>> logs_;
     RecordId next_id_ = 1;
-    uint32_t write_count_ = 0;
+    std::map<std::string, uint32_t> write_counts_;
+
+    static constexpr size_t MAX_BLOBS = 64;
+    static constexpr size_t MAX_LOGS = 8;
+    static constexpr size_t MAX_RECORDS_PER_LOG = 5000;
+    static constexpr size_t MAX_BLOB_BYTES = 2 * 1024 * 1024;
+    static constexpr size_t MAX_RECORD_BYTES = 4096;
 };
 
 // ============================================================

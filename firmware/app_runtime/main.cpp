@@ -20,6 +20,7 @@ static EventQueue* g_queue = nullptr;
 static const std::string DEVICE_ID      = "dev_123";
 static const std::string SESSION_ID     = "sess_001";
 static const std::string FW_VERSION     = "0.1.0";
+static std::string       g_device_token;
 
 // System flags — tasks inhe check karte hain
 static std::atomic<bool> g_running         {true};
@@ -41,6 +42,43 @@ inline void watchdog_kick(const std::string& task_name) {
     g_watchdog_timestamps[task_name] = now_ms();
 }
 
+std::vector<std::string> watchdog_overdue_tasks(uint64_t current_ms) {
+    const std::map<std::string, uint64_t> deadlines = {
+        {"TelemetryTask", 1000},
+        {"SyncTask", 5000},
+        {"DiagnosticsTask", 10000},
+        {"PowerTask", 5000},
+        {"UiTask", 1000},
+        {"OtaTask", 35000},
+    };
+
+    std::vector<std::string> overdue;
+    std::lock_guard<std::mutex> lock(g_watchdog_mutex);
+    for (const auto& item : deadlines) {
+        auto heartbeat = g_watchdog_timestamps.find(item.first);
+        if (heartbeat != g_watchdog_timestamps.end() &&
+            current_ms - heartbeat->second > item.second) {
+            overdue.push_back(item.first);
+        }
+    }
+    return overdue;
+}
+
+std::string json_escape(const std::string& input) {
+    std::string output;
+    for (char c : input) {
+        switch (c) {
+            case '"':  output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\n': output += "\\n";  break;
+            case '\r': output += "\\r";  break;
+            case '\t': output += "\\t";  break;
+            default:   output += c;      break;
+        }
+    }
+    return output;
+}
+
 // ============================================================
 // Helper — Event banana
 // ============================================================
@@ -52,6 +90,7 @@ Event make_event(EventType type,
     e.student_session_id  = SESSION_ID;
     e.occurred_at_utc_ms  = hal.time->now_utc();
     e.monotonic_ms        = hal.time->monotonic_now();
+    e.correlation_id      = e.occurred_at_utc_ms ^ e.monotonic_ms;
     e.firmware_version    = FW_VERSION;
     e.battery_pct         = hal.power->battery_state().percent;
     e.payload             = payload;
@@ -180,15 +219,34 @@ void SyncTask() {
             std::string body = "{";
             body += "\"schema_version\":\"device_event.v1\",";
             body += "\"device_id\":\"" + event.device_id + "\",";
+            body += "\"student_session_id\":\""
+                 + json_escape(event.student_session_id) + "\",";
             body += "\"event_id\":\""
                  + std::to_string(event.event_id) + "\",";
+            body += "\"correlation_id\":\""
+                 + std::to_string(event.correlation_id) + "\",";
             body += "\"sequence_number\":"
                  + std::to_string(event.sequence_number) + ",";
+            body += "\"occurred_at_ms\":"
+                 + std::to_string(event.occurred_at_utc_ms) + ",";
+            body += "\"monotonic_ms\":"
+                 + std::to_string(event.monotonic_ms) + ",";
             body += "\"event_type\":\""
                  + std::string(event_type_str(event.type)) + "\",";
+            body += "\"payload\":{";
+            bool first_payload = true;
+            for (const auto& item : event.payload) {
+                if (!first_payload) body += ",";
+                body += "\"" + json_escape(item.first) + "\":\""
+                     + json_escape(item.second) + "\"";
+                first_payload = false;
+            }
+            body += "},";
             body += "\"diagnostics\":{";
             body += "\"battery_pct\":"
                  + std::to_string(event.battery_pct) + ",";
+            body += "\"rssi_dbm\":"
+                 + std::to_string(event.rssi_dbm) + ",";
             body += "\"firmware_version\":\""
                  + event.firmware_version + "\"}}";
 
@@ -198,7 +256,7 @@ void SyncTask() {
 
             Headers headers;
             headers.device_id    = DEVICE_ID;
-            headers.device_token = "sim_device_token_dev_123";
+            headers.device_token = g_device_token;
 
             Endpoint endpoint;
             endpoint.url = "http://localhost:5000/telemetry";
@@ -246,6 +304,10 @@ void DiagnosticsTask() {
                   << " connected=" << g_connected.load()
                   << " ota=" << g_ota_in_progress.load()
                   << "\n";
+
+        for (const std::string& task : watchdog_overdue_tasks(uptime)) {
+            std::cout << "[WATCHDOG] overdue task=" << task << "\n";
+        }
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(5000));
@@ -356,7 +418,7 @@ void OtaTask() {
         // Check for update
         Headers headers;
         headers.device_id    = DEVICE_ID;
-        headers.device_token = "sim_device_token_dev_123";
+        headers.device_token = g_device_token;
 
         Endpoint endpoint;
         endpoint.url = "http://localhost:5000/ota/check";
@@ -429,7 +491,17 @@ bool boot_sequence() {
     hal = create_sim_hal();
     std::cout << "[BOOT] HAL initialized\n";
 
-    // Step 2: Event queue init + recover
+    // Step 2: Load device authentication material through the HAL.
+    uint8_t token_buffer[128]{};
+    Status token_status = hal.security->read_secure_secret(
+        1, {token_buffer, sizeof(token_buffer) - 1});
+    if (token_status != Status::OK) {
+        std::cout << "[BOOT] device secret unavailable\n";
+        return false;
+    }
+    g_device_token = reinterpret_cast<const char*>(token_buffer);
+
+    // Step 3: Event queue init + recover
     static EventQueue queue(hal.storage);
     g_queue = &queue;
     Status s = g_queue->recover();
@@ -439,7 +511,7 @@ bool boot_sequence() {
     }
     std::cout << "[BOOT] event queue recovered\n";
 
-    // Step 3: Network connect
+    // Step 4: Network connect
     WifiCredentials creds{"GenEd_WiFi", "password123"};
     s = hal.network->connect(creds);
     if (s == Status::OK) {
@@ -450,10 +522,10 @@ bool boot_sequence() {
                   << " — buffering mode\n";
     }
 
-    // Step 4: Time sync
+    // Step 5: Time sync
     hal.time->sync_time();
 
-    // Step 5: Boot event
+    // Step 6: Boot event
     Event reboot = make_event(EventType::DEVICE_REBOOTED,
         {{"reason", "power_on"}});
     g_queue->enqueue(reboot);

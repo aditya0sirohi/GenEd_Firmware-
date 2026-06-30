@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 
 // ============================================================
 // Constructor
@@ -78,13 +79,23 @@ Status EventQueue::mark_committed(uint64_t event_id) {
 
     for (auto& e : queue_) {
         if (e.event_id == event_id) {
-            e.committed = true;
-            total_committed_++;
+            if (e.committed) {
+                return Status::OK;
+            }
 
-            // Storage mein bhi mark karo
-            storage_->mark_record_committed(
+            // Persist the acknowledgement first. If this fails, leave the
+            // in-memory event pending so SyncTask safely retries it.
+            Status storage_status = storage_->mark_record_committed(
                 LOG_EVENTS,
                 (RecordId)event_id);
+            if (storage_status != Status::OK) {
+                std::cout << "[EVENT_QUEUE] commit persistence FAILED"
+                          << " event_id=" << event_id << "\n";
+                return storage_status;
+            }
+
+            e.committed = true;
+            total_committed_++;
 
             std::cout << "[EVENT_QUEUE] committed event_id="
                       << event_id
@@ -114,7 +125,14 @@ size_t EventQueue::pending_count() const {
 // Recovery — reboot ke baad storage se reload
 // ============================================================
 Status EventQueue::recover() {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::cout << "[EVENT_QUEUE] starting recovery...\n";
+
+    // recover() is intentionally idempotent. This also makes a simulated
+    // reboot easy to test without duplicating records in RAM.
+    queue_.clear();
+    next_event_id_ = 1;
+    next_sequence_ = 1;
 
     struct Visitor : IRecordVisitor {
         EventQueue* q;
@@ -126,6 +144,11 @@ Status EventQueue::recover() {
             Event e;
             if (q->deserialize(data.data, data.len, e)) {
                 if (!e.committed) {
+                    if (q->queue_.size() >= MAX_QUEUE_SIZE) {
+                        std::cout << "[EVENT_QUEUE] recovery stopped: "
+                                  << "RAM queue capacity reached\n";
+                        return false;
+                    }
                     q->queue_.push_back(e);
                     // Sequence tracking update karo
                     if (e.event_id >= q->next_event_id_)
@@ -195,9 +218,50 @@ uint64_t EventQueue::oldest_pending_age_ms(
 // Serialize — Event → bytes
 // Simple format: [event_id|seq|type|utc_ms|mono_ms|
 //                 committed|device_id|session_id|
-//                 battery|rssi|fw_version]
+//                 battery|rssi|fw_version|correlation_id|payload]
 // Production mein protobuf ya CBOR use hoga
 // ============================================================
+namespace {
+std::string escape_field(const std::string& input) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string output;
+    for (unsigned char c : input) {
+        if (c == '%' || c == '|' || c == ';' || c == '=') {
+            output += '%';
+            output += hex[(c >> 4) & 0x0F];
+            output += hex[c & 0x0F];
+        } else {
+            output += static_cast<char>(c);
+        }
+    }
+    return output;
+}
+
+int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+std::string unescape_field(const std::string& input) {
+    std::string output;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '%' && i + 2 < input.size()) {
+            int high = hex_value(input[i + 1]);
+            int low = hex_value(input[i + 2]);
+            if (high >= 0 && low >= 0) {
+                output += static_cast<char>((high << 4) | low);
+                i += 2;
+                continue;
+            }
+        }
+        output += input[i];
+    }
+    return output;
+}
+} // namespace
+
 std::vector<uint8_t> EventQueue::serialize(
     const Event& e) const {
 
@@ -212,7 +276,15 @@ std::vector<uint8_t> EventQueue::serialize(
     s += e.student_session_id              + "|";
     s += std::to_string(e.battery_pct)     + "|";
     s += std::to_string(e.rssi_dbm)        + "|";
-    s += e.firmware_version;
+    s += escape_field(e.firmware_version)  + "|";
+    s += std::to_string(e.correlation_id)  + "|";
+
+    bool first = true;
+    for (const auto& item : e.payload) {
+        if (!first) s += ";";
+        s += escape_field(item.first) + "=" + escape_field(item.second);
+        first = false;
+    }
 
     return std::vector<uint8_t>(s.begin(), s.end());
 }
@@ -250,7 +322,24 @@ bool EventQueue::deserialize(const uint8_t* data,
         out.student_session_id = parts[7];
         out.battery_pct        = (uint8_t)std::stoul(parts[8]);
         out.rssi_dbm           = (int16_t)std::stoi(parts[9]);
-        out.firmware_version   = parts[10];
+        out.firmware_version   = unescape_field(parts[10]);
+
+        // Fields added after the initial prototype are optional so records
+        // written by the earlier format can still be recovered.
+        if (parts.size() >= 12)
+            out.correlation_id = std::stoull(parts[11]);
+
+        if (parts.size() >= 13 && !parts[12].empty()) {
+            std::stringstream payload_stream(parts[12]);
+            std::string item;
+            while (std::getline(payload_stream, item, ';')) {
+                size_t equals = item.find('=');
+                if (equals == std::string::npos) continue;
+                std::string key = unescape_field(item.substr(0, equals));
+                std::string value = unescape_field(item.substr(equals + 1));
+                out.payload[key] = value;
+            }
+        }
     } catch (...) {
         return false;
     }

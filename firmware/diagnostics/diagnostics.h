@@ -2,6 +2,7 @@
 #include "../hal/include/hal.h"
 #include <string>
 #include <vector>
+#include <mutex>
 
 enum class LogSeverity {
     INFO,
@@ -37,4 +38,5 @@ private:
     static constexpr size_t RING_BUFFER_MAX = 100;
     std::vector<std::string> trace_ring_buffer_;
     size_t current_ring_index_ = 0;
+    mutable std::mutex mutex_;
 };

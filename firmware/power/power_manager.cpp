@@ -5,11 +5,23 @@ PowerManager::PowerManager(IPower* power_hal) : power_(power_hal) {}
 
 Status PowerManager::evaluate_state(uint64_t idle_time_ms, bool is_connected) {
     BatteryState bat = power_->battery_state();
-    
-    // TODO: Implement state machine transitions based on battery level, 
-    // idle_time_ms (e.g., > 10 mins), and connectivity status.
-    // Ensure LOW_BATTERY and RECOVERY transitions log properly.
-    
+
+    SystemPowerState next = SystemPowerState::ACTIVE;
+    if (bat.brownout_risk) {
+        next = SystemPowerState::RECOVERY;
+    } else if (bat.percent <= 20) {
+        next = SystemPowerState::LOW_BATTERY;
+    } else if (!is_connected) {
+        next = SystemPowerState::DISCONNECTED_BUFFERING;
+    } else if (idle_time_ms >= 600000) {
+        next = SystemPowerState::CONNECTED_IDLE;
+    }
+
+    if (next != current_state_) {
+        std::cout << "[POWER] state " << static_cast<int>(current_state_)
+                  << " -> " << static_cast<int>(next) << "\n";
+        current_state_ = next;
+    }
     return Status::OK;
 }
 
@@ -18,8 +30,9 @@ SystemPowerState PowerManager::get_state() const {
 }
 
 Status PowerManager::enter_sleep(SleepMode mode, Duration max_duration) {
-    std::cout << "[POWER Stub] Preparing system for sleep mode...\n";
+    std::cout << "[POWER] preparing system for sleep mode\n";
     current_state_ = SystemPowerState::SLEEP;
-    // TODO: Save critical registers, flush event queue to flash, and invoke HAL sleep
+    // EventQueue appends synchronously, so no queued storage write needs
+    // flushing in the current host model.
     return power_->enter_sleep(mode, max_duration);
 }

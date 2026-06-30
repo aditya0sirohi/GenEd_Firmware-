@@ -14,11 +14,17 @@ public:
     std::vector<Event> get_and_clear_derived_events();
 
 private:
-    int recent_button_presses_ = 0;
+    static constexpr uint64_t HELP_WINDOW_MS = 300000;
+    static constexpr uint64_t INACTIVITY_THRESHOLD_MS = 600000;
+
+    std::vector<uint64_t> help_request_times_;
     uint64_t last_press_time_ms_ = 0;
+    bool repeated_help_emitted_ = false;
+    bool engagement_drop_emitted_ = false;
     
     std::vector<Event> derived_events_queue_;
     
-    void check_for_repeated_requests();
-    void check_for_engagement_drop(uint64_t current_time_ms);
+    void check_for_repeated_requests(const Event& source);
+    void check_for_engagement_drop(const Event& source);
+    Event derived_from(const Event& source, EventType type) const;
 };

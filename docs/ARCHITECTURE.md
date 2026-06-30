@@ -1,5 +1,10 @@
 # ARCHITECTURE.md — GenEd Companion Firmware
 
+> This document describes the target architecture. It is not a completion
+> claim. `GAPS.md` is the source of truth for what is implemented, tested, or
+> still planned. In particular, ESP32, process-persistent flash, real HTTP and
+> full OTA recovery are not complete.
+
 ## Overview
 
 Simulation-first firmware foundation for ESP32-class GenEd companion

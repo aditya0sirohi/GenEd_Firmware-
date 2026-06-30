@@ -1,4 +1,7 @@
-# Firmware Performance & Memory Budget Report
+# Firmware Budget Estimate
+
+> These are design estimates, not measured ESP32 results. Repeatable latency,
+> CPU, stack-watermark and flash-lifespan measurements remain outstanding.
 
 ## 1. System Constraints
 * **Total RAM:** 512 KB 
@@ -25,6 +28,7 @@ All major subsystems run in isolated RTOS tasks.
 | `TelemetryTask` | 4 KB | Medium (2) | Reading from HAL, pushing to Durable Queue |
 | `UiTask` | 2 KB | Low (1) | Simple GPIO LED/Buzzer toggling |
 | `DiagnosticsTask`| 4 KB | Low (1) | Formatting JSON traces, checking watchdogs |
+| `PowerTask` | 4 KB | Low (1) | Battery reads and state transitions |
 
 ## 4. Flash Partition Map (8 MB Total)
 | Partition | Size | Purpose |
@@ -37,5 +41,9 @@ All major subsystems run in isolated RTOS tasks.
 | `spiffs_logs` | ~900 KB | Crash dumps and diagnostic traces |
 
 ## 5. Queue Budgets
-* **Durable Event Queue (Flash):** Max 5,000 events (approx. 500 KB limit). Oldest events are dropped if un-synced and flash is full.
-* **Derived Events Queue (RAM):** Max 50 items.
+* **Active unacknowledged queue:** 100 events. New events receive
+  `ERR_FULL` at the limit; older unacknowledged events are never overwritten.
+* **Simulated append log:** At most 5,000 records per logical log, with
+  acknowledged records compacted when the limit is reached.
+* **Derived events:** The current deterministic rules emit at most three
+  derived events for one session state.

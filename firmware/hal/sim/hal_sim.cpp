@@ -1,4 +1,5 @@
 #include "hal_sim.h"
+#include <algorithm>
 #include <iostream>
 #include <cstring>
 #include <thread>
@@ -46,7 +47,12 @@ Status SimStorage::read_blob(Key key, Span<uint8_t> out) {
 Status SimStorage::write_blob_atomic(Key key,
                                       Span<const uint8_t> data) {
     std::lock_guard<std::mutex> lock(mutex_);
-    write_count_++;
+    write_counts_["blob:" + std::string(key)]++;
+
+    if (data.len > MAX_BLOB_BYTES)
+        return Status::ERR_FULL;
+    if (blobs_.find(key) == blobs_.end() && blobs_.size() >= MAX_BLOBS)
+        return Status::ERR_FULL;
 
     if (corrupt_next_write) {
         corrupt_next_write = false;
@@ -59,14 +65,31 @@ Status SimStorage::write_blob_atomic(Key key,
                                         data.data + data.len);
     std::cout << "[SIM_STORAGE] write_blob_atomic key="
               << key << " size=" << data.len
-              << " total_writes=" << write_count_ << "\n";
+              << " region_writes="
+              << write_counts_["blob:" + std::string(key)] << "\n";
     return Status::OK;
 }
 
 Status SimStorage::append_record(LogId log,
                                   Span<const uint8_t> record) {
     std::lock_guard<std::mutex> lock(mutex_);
-    write_count_++;
+    write_counts_["log:" + std::to_string(log)]++;
+
+    if (record.len > MAX_RECORD_BYTES)
+        return Status::ERR_FULL;
+    if (logs_.find(log) == logs_.end() && logs_.size() >= MAX_LOGS)
+        return Status::ERR_FULL;
+
+    auto& records = logs_[log];
+    if (records.size() >= MAX_RECORDS_PER_LOG) {
+        // Compact acknowledged records before applying backpressure.
+        records.erase(
+            std::remove_if(records.begin(), records.end(),
+                [](const Record& item) { return item.committed; }),
+            records.end());
+        if (records.size() >= MAX_RECORDS_PER_LOG)
+            return Status::ERR_FULL;
+    }
 
     if (corrupt_next_write) {
         corrupt_next_write = false;
@@ -79,7 +102,7 @@ Status SimStorage::append_record(LogId log,
     r.id   = next_id_++;
     r.data = std::vector<uint8_t>(record.data,
                                    record.data + record.len);
-    logs_[log].push_back(r);
+    records.push_back(r);
 
     std::cout << "[SIM_STORAGE] append_record log=" << log
               << " record_id=" << r.id
@@ -94,6 +117,10 @@ Status SimStorage::scan_records(LogId log,
     if (it == logs_.end()) return Status::OK;
 
     for (auto& r : it->second) {
+        // Committed records have already been acknowledged by the server.
+        // They stay in the simulated append log so write/compaction behavior
+        // can be inspected, but recovery must never replay them.
+        if (r.committed) continue;
         Span<const uint8_t> span{r.data.data(), r.data.size()};
         if (!visitor.on_record(r.id, span)) break;
     }
@@ -123,6 +150,22 @@ Status SimStorage::inject_corruption_for_test(Key key,
               << key << "\n";
     corrupt_next_write = true;
     return Status::OK;
+}
+
+uint32_t SimStorage::write_count_for(const std::string& region) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto item = write_counts_.find(region);
+    return item == write_counts_.end() ? 0 : item->second;
+}
+
+size_t SimStorage::used_bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t total = 0;
+    for (const auto& blob : blobs_) total += blob.second.size();
+    for (const auto& log : logs_)
+        for (const auto& record : log.second)
+            total += record.data.size();
+    return total;
 }
 
 // ============================================================

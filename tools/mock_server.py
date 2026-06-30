@@ -17,6 +17,7 @@ app = Flask(__name__)
 # ============================================================
 registered_devices = {}   # device_id → token
 received_events    = []   # sab events yahan store honge
+received_event_keys = set()  # (device_id, event_id) for idempotency
 ota_available      = True # OTA update available hai?
 current_fw_version = "0.1.0"
 next_fw_version    = "0.2.0"
@@ -62,7 +63,11 @@ def telemetry():
     etype    = data.get("event_type", "unknown")
     dev_id   = data.get("device_id", "unknown")
 
-    received_events.append(data)
+    key = (dev_id, str(event_id))
+    duplicate = key in received_event_keys
+    if not duplicate:
+        received_events.append(data)
+        received_event_keys.add(key)
 
     print(f"[TELEMETRY] received event_id={event_id}"
           f" seq={seq} type={etype} device={dev_id}"
@@ -71,7 +76,8 @@ def telemetry():
     return jsonify({
         "status":   "ok",
         "event_id": event_id,
-        "ack":      "committed"
+        "ack":      "committed",
+        "duplicate": duplicate
     }), 200
 
 # ============================================================
@@ -89,7 +95,11 @@ def telemetry_batch():
             print(f"[TELEMETRY_BATCH] simulating partial ack"
                   f" — rejecting last event")
             break
-        received_events.append(event)
+        key = (event.get("device_id", "unknown"),
+               str(event.get("event_id")))
+        if key not in received_event_keys:
+            received_events.append(event)
+            received_event_keys.add(key)
         acknowledged.append(event.get("event_id"))
         print(f"[TELEMETRY_BATCH] ack event_id="
               f"{event.get('event_id')}")
@@ -177,8 +187,9 @@ def debug_ota_toggle():
 @app.route("/debug/reset", methods=["POST"])
 def debug_reset():
     """Sab state reset karo"""
-    global received_events, registered_devices
+    global received_events, received_event_keys, registered_devices
     received_events    = []
+    received_event_keys = set()
     registered_devices = {}
     print("[DEBUG] server state reset")
     return jsonify({"status": "reset"}), 200

@@ -1,47 +1,111 @@
 #include "ota.h"
 #include <iostream>
+#include <vector>
 
 OtaManager::OtaManager(INetwork* network, IStorage* storage, ISecurity* crypto) 
     : network_(network), storage_(storage), crypto_(crypto) {}
 
 Status OtaManager::validate_current_boot() {
-    std::cout << "[OTA Stub] Validating current boot slot health...\n";
-    // TODO: Read boot confirmation state from storage. 
-    // If not confirmed within 2 minutes of booting, auto-trigger rollback.
+    uint8_t pending_slot = 0;
+    Status status = storage_->read_blob(
+        "ota_pending_slot", {&pending_slot, 1});
+    if (status == Status::OK) {
+        current_state_ = OtaState::PENDING_CONFIRM;
+        std::cout << "[OTA] boot is pending health confirmation"
+                  << " slot=" << static_cast<int>(pending_slot) << "\n";
+    } else if (status != Status::ERR_NOT_FOUND) {
+        return status;
+    }
     return Status::OK;
 }
 
 Status OtaManager::check_for_updates(const std::string& current_version) {
-    std::cout << "[OTA Stub] Checking cloud for updates newer than " << current_version << "\n";
-    // TODO: Poll /ota/check endpoint.
-    return Status::OK;
+    std::string request = "{\"version\":\"" + current_version + "\"}";
+    HttpResponse response;
+    Status status = network_->post_json(
+        {"http://localhost:5000/ota/check"}, {"dev_123", "sim_token"},
+        {reinterpret_cast<const uint8_t*>(request.data()), request.size()},
+        &response);
+    if (status != Status::OK) return status;
+    return response.status_code == 200 ? Status::OK : Status::ERR_HARDWARE;
 }
 
 Status OtaManager::begin_download(const std::string& update_url) {
     current_state_ = OtaState::DOWNLOADING;
-    std::cout << "[OTA Stub] Downloading payload to INACTIVE slot...\n";
-    // TODO: Stream chunks from network_ to storage_ into the standby partition.
-    // Handle interrupted downloads using Range requests.
-    return Status::OK;
+    // The host model stores a deterministic stand-in image. The ESP32 HAL
+    // will replace this with streamed partition writes.
+    std::string image = "simulated_firmware_image:" + update_url;
+    downloaded_bytes_ = image.size();
+    Status status = storage_->write_blob_atomic(
+        "ota_inactive_image",
+        {reinterpret_cast<const uint8_t*>(image.data()), image.size()});
+    if (status != Status::OK) {
+        current_state_ = OtaState::FAILED;
+        downloaded_bytes_ = 0;
+    }
+    return status;
 }
 
 Status OtaManager::verify_signature(PublicKeyId key) {
     current_state_ = OtaState::VERIFYING;
-    std::cout << "[OTA Stub] Verifying cryptographic signature of downloaded image...\n";
-    // TODO: Read blob from standby partition, compute SHA256, and verify RSA/ECDSA signature using crypto_
-    return Status::OK;
+    if (downloaded_bytes_ == 0) {
+        current_state_ = OtaState::FAILED;
+        return Status::ERR_INVALID;
+    }
+
+    std::vector<uint8_t> image(downloaded_bytes_);
+    Status status = storage_->read_blob(
+        "ota_inactive_image", {image.data(), image.size()});
+    if (status != Status::OK) {
+        current_state_ = OtaState::FAILED;
+        return status;
+    }
+
+    Hash hash{};
+    status = crypto_->sha256({image.data(), image.size()}, &hash);
+    if (status == Status::OK) {
+        status = crypto_->verify_signature(
+            key, {image.data(), image.size()}, image_signature_);
+    }
+    if (status != Status::OK) current_state_ = OtaState::FAILED;
+    return status;
 }
 
 Status OtaManager::mark_slot_active_and_reboot() {
-    current_state_ = OtaState::PENDING_REBOOT;
-    std::cout << "[OTA Stub] Update verified. Swapping boot flags and rebooting...\n";
-    // TODO: Write new boot slot index atomically. Request system reset.
-    return Status::OK;
+    if (current_state_ != OtaState::VERIFYING)
+        return Status::ERR_INVALID;
+
+    uint8_t pending_slot =
+        static_cast<uint8_t>(current_active_slot_ == 0 ? 1 : 0);
+    Status status = storage_->write_blob_atomic(
+        "ota_pending_slot", {&pending_slot, 1});
+    if (status == Status::OK)
+        current_state_ = OtaState::PENDING_REBOOT;
+    return status;
+}
+
+Status OtaManager::confirm_boot() {
+    if (current_state_ != OtaState::PENDING_CONFIRM &&
+        current_state_ != OtaState::PENDING_REBOOT)
+        return Status::ERR_INVALID;
+
+    uint8_t pending_slot = 0;
+    Status status = storage_->read_blob(
+        "ota_pending_slot", {&pending_slot, 1});
+    if (status != Status::OK) return status;
+
+    status = storage_->write_blob_atomic(
+        "ota_active_slot", {&pending_slot, 1});
+    if (status == Status::OK) {
+        current_active_slot_ = pending_slot;
+        current_state_ = OtaState::CONFIRMED;
+    }
+    return status;
 }
 
 Status OtaManager::trigger_rollback() {
     current_state_ = OtaState::ROLLBACK;
-    std::cout << "[OTA Stub] CRITICAL: System health check failed. Rolling back to previous slot.\n";
-    // TODO: Revert boot partition flag to the known-good slot and reset.
-    return Status::OK;
+    uint8_t active_slot = static_cast<uint8_t>(current_active_slot_);
+    return storage_->write_blob_atomic(
+        "ota_pending_slot", {&active_slot, 1});
 }
